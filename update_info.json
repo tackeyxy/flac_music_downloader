@@ -1,0 +1,20 @@
+{
+  "version_info": {
+    "app_name": "无损音乐下载器",
+    "package_name": "flac_music_v3.1",
+    "current_version": "3.1",
+    "package_size": "54 MB",
+    "release_date": "2026-01-30",
+    "installer_type": "EXE",
+    "update_time": "2026-01-30 15:30"
+  },
+  "download": {
+    "Windows": {
+      "url": "https://gh-proxy.org/https://github.com/tackeyxy/flac_music_downloader/blob/main/flac_music_v3.1.exe",
+      "compatibility": "Windows 10/11"
+    }
+  },
+  "update_content": [
+    "修复音乐源获取下载链接异常"
+  ]
+}
