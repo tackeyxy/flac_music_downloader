@@ -9,9 +9,12 @@ from tkinter import ttk, scrolledtext, messagebox, filedialog
 import threading
 import time
 import os
+import sys
+import shutil
 from datetime import datetime, timedelta
 import traceback
 import math
+import subprocess
 
 # 彻底地禁用所有警告
 warnings.filterwarnings("ignore")
@@ -102,6 +105,98 @@ class DownloadProgressTracker:
             return f"{self.format_size(self.downloaded)} (大小未知)"
 
 
+class UpdateChecker:
+    """更新检查器"""
+
+    def __init__(self, parent_app):
+        self.parent_app = parent_app
+        self.update_info = None
+        self.local_version = "3.2"  # 当前本地版本
+        self.update_url = "https://gh-proxy.org/https://github.com/tackeyxy/flac_music_downloader/blob/main/update_info.json"
+
+    def check_for_update(self):
+        """检查更新"""
+        try:
+            response = requests.get(self.update_url, verify=False, timeout=10)
+            response.raise_for_status()
+
+            self.update_info = response.json()
+
+            # 提取远程版本号
+            remote_version = self.update_info.get("version_info", {}).get("current_version", "0.0")
+
+            # 比较版本号
+            if self.is_newer_version(remote_version, self.local_version):
+                return True, self.update_info
+            else:
+                return False, self.update_info
+
+        except Exception as e:
+            self.parent_app.log(f"检查更新失败: {str(e)}", "RED")
+            return False, None
+
+    def is_newer_version(self, remote_version, local_version):
+        """比较版本号，判断远程版本是否更新"""
+        try:
+            # 将版本号转换为数字列表以便比较
+            remote_parts = list(map(int, remote_version.split('.')))
+            local_parts = list(map(int, local_version.split('.')))
+
+            # 确保版本号长度一致
+            max_len = max(len(remote_parts), len(local_parts))
+            remote_parts.extend([0] * (max_len - len(remote_parts)))
+            local_parts.extend([0] * (max_len - len(local_parts)))
+
+            # 比较每个部分
+            for r, l in zip(remote_parts, local_parts):
+                if r > l:
+                    return True
+                elif r < l:
+                    return False
+            return False  # 版本完全相同
+        except:
+            # 如果版本号解析失败，使用字符串比较
+            return remote_version > local_version
+
+    def download_update(self, download_url, callback=None):
+        """下载更新文件"""
+        try:
+            # 获取当前运行目录
+            current_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+
+            # 从URL提取文件名
+            filename = os.path.basename(download_url)
+            if '?' in filename:
+                filename = filename.split('?')[0]
+
+            filepath = os.path.join(current_dir, filename)
+
+            # 下载文件
+            response = requests.get(download_url, stream=True, verify=False, timeout=30)
+            response.raise_for_status()
+
+            total_size = int(response.headers.get('content-length', 0))
+
+            # 创建进度跟踪器
+            tracker = DownloadProgressTracker(filename, total_size)
+
+            with open(filepath, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        tracker.update(len(chunk))
+
+                        # 如果有回调函数，更新进度
+                        if callback:
+                            callback(tracker)
+
+            return filepath, True
+
+        except Exception as e:
+            self.parent_app.log(f"下载更新失败: {str(e)}", "RED")
+            return None, False
+
+
 class ModernButton(tk.Button):
     """现代化按钮控件"""
 
@@ -178,10 +273,330 @@ class ModernEntry(tk.Entry):
         super().__init__(master, **defaults)
 
 
+class UpdateDialog:
+    """更新弹窗"""
+
+    def __init__(self, parent, update_info, download_callback, skip_callback):
+        self.parent = parent
+        self.update_info = update_info
+        self.download_callback = download_callback
+        self.skip_callback = skip_callback
+
+        self.downloaded_file = None
+        self.is_downloading = False
+
+        self.create_dialog()
+
+    def create_dialog(self):
+        """创建更新弹窗"""
+        self.dialog = tk.Toplevel(self.parent)
+        self.dialog.title("发现新版本")
+        self.dialog.geometry("600x700")
+        self.dialog.configure(bg=COLORS['bg_light'])
+        self.dialog.resizable(False, False)
+
+        # 使弹窗模态
+        self.dialog.transient(self.parent)
+        self.dialog.grab_set()
+
+        # 设置窗口居中
+        self.center_window()
+
+        # 添加内容
+        self.create_content()
+
+        # 绑定关闭事件
+        self.dialog.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def center_window(self):
+        """窗口居中显示"""
+        self.dialog.update_idletasks()
+        width = self.dialog.winfo_width()
+        height = self.dialog.winfo_height()
+        x = (self.dialog.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.dialog.winfo_screenheight() // 2) - (height // 2)
+        self.dialog.geometry(f'{width}x{height}+{x}+{y}')
+
+    def create_content(self):
+        """创建弹窗内容"""
+        # 标题
+        title_frame = tk.Frame(self.dialog, bg=COLORS['primary'], height=60)
+        title_frame.pack(fill=tk.X)
+        title_frame.pack_propagate(False)
+
+        title_label = tk.Label(title_frame,
+                               text="发现新版本",
+                               font=("Microsoft YaHei", 16, "bold"),
+                               fg="white",
+                               bg=COLORS['primary'])
+        title_label.pack(expand=True)
+
+        # 版本信息
+        info_frame = tk.Frame(self.dialog, bg=COLORS['bg_light'], padx=20, pady=20)
+        info_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        version_info = self.update_info.get("version_info", {})
+
+        # 版本号
+        version_frame = tk.Frame(info_frame, bg=COLORS['bg_light'])
+        version_frame.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(version_frame,
+                 text="新版本:",
+                 font=("Microsoft YaHei", 11, "bold"),
+                 bg=COLORS['bg_light']).pack(side=tk.LEFT)
+
+        tk.Label(version_frame,
+                 text=f"v{version_info.get('current_version', '未知')}",
+                 font=("Microsoft YaHei", 11),
+                 fg=COLORS['primary'],
+                 bg=COLORS['bg_light']).pack(side=tk.LEFT, padx=(5, 0))
+
+        # 应用名称
+        tk.Label(version_frame,
+                 text=f" - {version_info.get('app_name', '无损音乐下载器')}",
+                 font=("Microsoft YaHei", 11),
+                 bg=COLORS['bg_light']).pack(side=tk.LEFT)
+
+        # 详细信息表格
+        details_frame = tk.LabelFrame(info_frame,
+                                      text="版本信息",
+                                      font=("Microsoft YaHei", 10, "bold"),
+                                      bg=COLORS['bg_light'],
+                                      fg=COLORS['dark'],
+                                      padx=10,
+                                      pady=10)
+        details_frame.pack(fill=tk.X, pady=(0, 15))
+
+        details = [
+            ("包大小:", version_info.get('package_size', '未知')),
+            ("发布日期:", version_info.get('release_date', '未知')),
+            ("更新时间:", version_info.get('update_time', '未知')),
+            ("包类型:", version_info.get('installer_type', 'EXE')),
+            ("运行平台:", self.update_info.get("download", {}).get("Windows", {}).get("compatibility", "Windows 10/11"))
+        ]
+
+        for label_text, value_text in details:
+            row_frame = tk.Frame(details_frame, bg=COLORS['bg_light'])
+            row_frame.pack(fill=tk.X, pady=2)
+
+            tk.Label(row_frame,
+                     text=label_text,
+                     font=("Microsoft YaHei", 9),
+                     bg=COLORS['bg_light'],
+                     width=12,
+                     anchor="w").pack(side=tk.LEFT)
+
+            tk.Label(row_frame,
+                     text=value_text,
+                     font=("Microsoft YaHei", 9),
+                     bg=COLORS['bg_light'],
+                     anchor="w").pack(side=tk.LEFT, padx=(5, 0))
+
+        # 更新内容
+        update_content = self.update_info.get("update_content", [])
+        if update_content:
+            content_frame = tk.LabelFrame(info_frame,
+                                          text="更新内容",
+                                          font=("Microsoft YaHei", 10, "bold"),
+                                          bg=COLORS['bg_light'],
+                                          fg=COLORS['dark'],
+                                          padx=10,
+                                          pady=10)
+            content_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+
+            content_text = tk.Text(content_frame,
+                                   height=5,
+                                   font=("Microsoft YaHei", 9),
+                                   bg=COLORS['bg_light'],
+                                   relief=tk.FLAT,
+                                   wrap=tk.WORD)
+            content_text.pack(fill=tk.BOTH, expand=True)
+
+            for i, content in enumerate(update_content, 1):
+                content_text.insert(tk.END, f"{i}. {content}\n")
+
+            content_text.config(state=tk.DISABLED)
+
+        # 进度条框架（初始隐藏）
+        self.progress_frame = tk.Frame(info_frame, bg=COLORS['bg_light'])
+
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(self.progress_frame,
+                                            variable=self.progress_var,
+                                            maximum=100,
+                                            style="Custom.Horizontal.TProgressbar")
+        self.progress_bar.pack(fill=tk.X, pady=(0, 5))
+
+        self.progress_label = tk.Label(self.progress_frame,
+                                       text="等待下载...",
+                                       font=("Microsoft YaHei", 9),
+                                       fg=COLORS['text_light'],
+                                       bg=COLORS['bg_light'])
+        self.progress_label.pack()
+
+        # 按钮框架
+        button_frame = tk.Frame(self.dialog, bg=COLORS['bg_light'], pady=15)
+        button_frame.pack(fill=tk.X, padx=20)
+
+        # 跳过按钮
+        skip_button = ModernButton(button_frame,
+                                   text="稍后提醒",
+                                   command=self.skip_update,
+                                   bg=COLORS['gray'],
+                                   font=('Microsoft YaHei', 10),
+                                   padx=20,
+                                   pady=8)
+        skip_button.pack(side=tk.LEFT, padx=(0, 10))
+
+        # 下载按钮
+        self.download_button = ModernButton(button_frame,
+                                            text="立即下载更新",
+                                            command=self.start_download,
+                                            bg=COLORS['primary'],
+                                            font=('Microsoft YaHei', 10, 'bold'),
+                                            padx=20,
+                                            pady=8)
+        self.download_button.pack(side=tk.RIGHT)
+
+    def start_download(self):
+        """开始下载更新"""
+        if self.is_downloading:
+            return
+
+        self.is_downloading = True
+        self.download_button.config(state=tk.DISABLED, text="下载中...")
+
+        # 显示进度条
+        self.progress_frame.pack(fill=tk.X, pady=(10, 0))
+
+        # 启动下载线程
+        thread = threading.Thread(target=self.download_update)
+        thread.daemon = True
+        thread.start()
+
+    def download_update(self):
+        """下载更新文件"""
+        try:
+            # 获取下载链接
+            download_url = self.update_info.get("download", {}).get("Windows", {}).get("url", "")
+            if not download_url:
+                raise Exception("未找到下载链接")
+
+            # 创建更新检查器实例
+            update_checker = UpdateChecker(None)
+
+            # 下载回调函数
+            def progress_callback(tracker):
+                # 更新进度条
+                self.progress_var.set(tracker.progress)
+                self.progress_label.config(text=f"{tracker.get_progress_text()} - {tracker.format_speed()}")
+
+                # 更新UI
+                self.dialog.update_idletasks()
+
+            # 开始下载
+            filepath, success = update_checker.download_update(download_url, progress_callback)
+
+            if success:
+                self.downloaded_file = filepath
+                self.progress_label.config(text="下载完成!", fg=COLORS['success'])
+                self.progress_var.set(100)
+
+                # 下载完成后显示安装按钮
+                self.download_button.config(state=tk.NORMAL,
+                                            text="立即安装",
+                                            command=self.prompt_installation,
+                                            bg=COLORS['success'])
+            else:
+                raise Exception("下载失败")
+
+        except Exception as e:
+            self.progress_label.config(text=f"下载失败: {str(e)}", fg=COLORS['danger'])
+            self.download_button.config(state=tk.NORMAL,
+                                        text="重试下载",
+                                        command=self.start_download)
+            self.is_downloading = False
+
+    def prompt_installation(self):
+        """提示安装"""
+        response = messagebox.askyesno("安装更新",
+                                       "更新文件已下载完成，是否立即安装？\n\n安装后软件将自动重启。")
+
+        if response:
+            # 执行安装
+            self.perform_installation()
+        else:
+            # 不安装，直接退出
+            messagebox.showinfo("退出", "更新已下载但未安装。软件将退出。")
+            self.dialog.destroy()
+            self.skip_callback(exit_app=True)
+
+    def perform_installation(self):
+        """执行安装"""
+        try:
+            if not self.downloaded_file or not os.path.exists(self.downloaded_file):
+                raise Exception("更新文件不存在")
+
+            # 获取当前运行的文件路径
+            current_exe = sys.argv[0]
+
+            # 创建安装脚本
+            self.create_install_script(current_exe, self.downloaded_file)
+
+            # 关闭当前应用
+            self.dialog.destroy()
+            self.download_callback(install=True)
+
+        except Exception as e:
+            messagebox.showerror("安装错误", f"安装失败: {str(e)}")
+
+    def create_install_script(self, old_file, new_file):
+        """创建安装脚本（用于替换旧版本）"""
+        script_content = f"""
+@echo off
+echo 正在安装更新...
+timeout /t 2 /nobreak >nul
+
+echo 正在关闭旧版本进程...
+taskkill /f /im "{os.path.basename(old_file)}" 2>nul
+
+echo 正在替换文件...
+del "{old_file}" 2>nul
+move "{new_file}" "{old_file}" 2>nul
+
+echo 启动新版本...
+start "" "{old_file}"
+
+echo 清理临时文件...
+del "%~f0" 2>nul
+"""
+
+        # 保存脚本
+        script_path = os.path.join(os.path.dirname(old_file), "install_update.bat")
+        with open(script_path, 'w', encoding='gbk') as f:
+            f.write(script_content)
+
+        # 运行脚本
+        subprocess.Popen([script_path], shell=True)
+
+    def skip_update(self):
+        """跳过更新"""
+        response = messagebox.askyesno("跳过更新",
+                                       "确定要跳过此更新吗？\n\n您可以在设置中手动检查更新。")
+        if response:
+            self.dialog.destroy()
+            self.skip_callback()
+
+    def on_close(self):
+        """关闭窗口事件"""
+        self.skip_update()
+
+
 class MusicDownloaderApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("无损音乐下载器 v3.1")
+        self.root.title("无损音乐下载器 v3.2")
         # 调整窗口高度，移除底部状态栏
         self.root.geometry("950x982")
 
@@ -230,11 +645,86 @@ class MusicDownloaderApp:
         # 创建界面
         self.create_widgets()
 
-        # 在后台初始化会话
+        # 在后台初始化会话和检查更新
         self.init_session_async()
+
+        # 启动更新检查（延迟2秒，等待主窗口显示）
+        self.root.after(2000, self.check_update_on_start)
 
         # 绑定窗口大小变化事件
         self.root.bind('<Configure>', self.on_window_resize)
+
+        # 更新检查器
+        self.update_checker = UpdateChecker(self)
+
+    def check_update_on_start(self):
+        """启动时检查更新"""
+        thread = threading.Thread(target=self.perform_update_check)
+        thread.daemon = True
+        thread.start()
+
+    def perform_update_check(self):
+        """执行更新检查"""
+        try:
+            has_update, update_info = self.update_checker.check_for_update()
+
+            if has_update:
+                # 在主线程中显示更新弹窗
+                self.root.after(0, lambda: self.show_update_dialog(update_info))
+            else:
+                self.log("当前已是最新版本", "GREEN")
+
+        except Exception as e:
+            self.log(f"更新检查失败: {str(e)}", "RED")
+
+    def show_update_dialog(self, update_info):
+        """显示更新弹窗"""
+
+        def download_callback(install=False):
+            if install:
+                # 安装更新，退出应用
+                self.log("开始安装更新，退出应用...", "GREEN")
+                self.root.quit()
+                self.root.destroy()
+
+        def skip_callback(exit_app=False):
+            if exit_app:
+                # 不安装，直接退出
+                self.log("用户选择不安装更新，退出应用...", "YELLOW")
+                self.root.quit()
+                self.root.destroy()
+
+        # 创建更新弹窗
+        self.update_dialog = UpdateDialog(self.root, update_info, download_callback, skip_callback)
+
+    def manual_check_update(self):
+        """手动检查更新"""
+        self.log("手动检查更新...")
+        self.status_label.config(text="正在检查更新...", fg=COLORS['primary'])
+
+        # 异步检查更新
+        thread = threading.Thread(target=self.manual_update_check_thread)
+        thread.daemon = True
+        thread.start()
+
+    def manual_update_check_thread(self):
+        """手动检查更新的线程函数"""
+        try:
+            has_update, update_info = self.update_checker.check_for_update()
+
+            if has_update:
+                # 在主线程中显示更新弹窗
+                self.root.after(0, lambda: self.show_update_dialog(update_info))
+                self.root.after(0, lambda: self.status_label.config(text="✅ 发现新版本!", fg=COLORS['success']))
+            else:
+                self.root.after(0, lambda: self.status_label.config(text="✅ 当前已是最新版本", fg=COLORS['success']))
+                self.root.after(0, lambda: messagebox.showinfo("检查更新", "当前已是最新版本!"))
+                self.log("当前已是最新版本", "GREEN")
+
+        except Exception as e:
+            self.root.after(0, lambda: self.status_label.config(text="❌ 更新检查失败", fg=COLORS['danger']))
+            self.log(f"手动检查更新失败: {str(e)}", "RED")
+            self.root.after(0, lambda: messagebox.showerror("检查更新失败", f"检查更新失败: {str(e)}"))
 
     def create_styles(self):
         """创建自定义样式"""
@@ -304,6 +794,16 @@ class MusicDownloaderApp:
                                        font=("Microsoft YaHei", 12),
                                        fg=COLORS['warning'], bg=COLORS['bg_light'])
         self.init_indicator.pack(side=tk.LEFT)
+
+        # 添加检查更新按钮到状态栏
+        self.update_check_button = ModernButton(status_frame,
+                                                text="检查更新",
+                                                command=self.manual_check_update,
+                                                bg=COLORS['secondary'],
+                                                font=('Microsoft YaHei', 9),
+                                                padx=8,
+                                                pady=4)
+        self.update_check_button.pack(side=tk.RIGHT, padx=(0, 5))
 
         # 合并的搜索和保存设置区域
         combined_frame = tk.LabelFrame(main_frame,
